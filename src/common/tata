@@ -1,0 +1,137 @@
+#ifndef __IPC_QUEUE_HPP
+#define __IPC_QUEUE_HPP
+#include <boost/interprocess/managed_shared_memory.hpp>
+#include <boost/interprocess/sync/interprocess_mutex.hpp>
+#include <boost/interprocess/sync/named_condition.hpp>
+#include <boost/interprocess/sync/named_mutex.hpp>
+
+#include "status.hpp"
+
+#include<thallium.hpp>
+#include<thallium/serialization/stl/string.hpp>
+
+#include<thallium/serialization/stl/list.hpp>
+#include<list>
+#include <functional>
+using namespace std::placeholders;
+namespace tl=thallium;
+//#define __DEBUG
+#include "common/debug.hpp"
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+namespace veloc_ipc {
+
+
+typedef std::function<void (int)> completion_t;
+
+inline void cleanup() {
+}
+    
+template <class T> class shm_queue_t:public tl::provider<shm_queue_t<T>> {
+	static const size_t MAX_SIZE = 1 << 20;
+	class container_t {
+		public:
+			std::mutex mutex_;
+			std::condition_variable cond_;
+			int status = VELOC_SUCCESS;
+			std::list<T> pending, progress;
+			container_t() : pending(), progress() { }
+
+			};
+
+	typedef typename std::list<T>::iterator list_iterator_t;
+
+	std::list<container_t*> segment;
+	boost::condition_variable the_condition_variable;
+	mutable boost::mutex the_mutex;
+	container_t *find_non_empty_pending() {
+		for (auto it = segment.begin(); it != segment.end(); ++it) {
+			container_t *result = (container_t *)it;
+			if (!result->pending.empty())
+				return result;
+		}
+		return NULL;
+	}
+	bool check_completion(container_t *data) {
+		// this is a predicate intended to be used for condition variables only
+		return data->pending.empty() && data->progress.empty();
+	}
+	void set_completion(container_t *q,const list_iterator_t &it,int status) {
+		// delete the element from the progress queue and notify the producer
+		DBG("completed element " << *it);
+		std::scoped_lock<std::mutex> mlock(q->mutex_);
+		q->progress.erase(it);
+		if (q->status < 0 || status < 0)
+			q->status = std::min(q->status, status);
+		else
+			q->status = std::max(q->status, status);
+		q->cond_.notify_one();
+	}
+	container *dataa;
+	int wait_completion(bool reset_status,std::string id) {
+
+		while (!check_completion(dataa))
+		int ret = dataa->status;
+		if (reset_status)
+			dataa->status = VELOC_SUCCESS;
+		return ret;
+	}
+
+	int get(){
+
+		return 42; 
+
+	}
+	//done
+	void enqueue(const T &e) {
+		// enqueue an element and notify the consumer
+		dataa=new container_t();
+		boost::mutex::scoped_lock lock(the_mutex);
+		bool const was_empty=segment.empty();
+		dataa->pending.push_back(e);
+		segment.push_back(dataa);
+		std::cout<<"data pushed to queue"<<std::endl;
+		lock.unlock();
+		if(was_empty){
+			the_condition_variable.notify_one();
+		}
+
+		DBG("enqueued element " << e);
+	}
+
+	public:    
+	shm_queue_t(tl::engine& e,uint16_t provider_id=1) : tl::provider<shm_queue_t<T>>(e,provider_id),segment()
+	{
+                std::scoped_lock<std::mutex> cond_lock(pending_mutex);
+
+		//I will define here the methods
+		this-> define("enqueue",&shm_queue_t::enqueue,tl::ignore_return_value());
+		this-> define("wait_completion",&shm_queue_t::wait_completion);
+		this-> define("get",&shm_queue_t::get);
+	}
+	//I am dequeueuing
+	completion_t dequeue_any(T &e) {
+		// wait until at least one pending queue has at least one element
+		container_t *first_found;
+		boost::mutex::scoped_lock lock(the_mutex);
+		while ((first_found = find_non_empty_pending()) == NULL){
+			std::cout<<"I am waiting in dequeue"<<std::endl;
+			the_condition_variable.wait(lock);
+		}
+		// remove the head of the pending queue and move it to the progress queue
+		//
+		e = first_found->pending.front();
+		first_found->pending.pop_front();
+		first_found->progress.push_back(e);
+		DBG("dequeued element from pending and put in progress" << e);
+		return std::bind(&shm_queue_t<T>::set_completion, this,first_found,std::prev(first_found->progress.end()), _1);
+	}
+	size_t get_num_queues() {
+		return segment.size();
+	}
+};
+
+};
+
+#endif // __IPC_QUEUE_HPP
